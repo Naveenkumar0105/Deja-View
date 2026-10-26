@@ -1,0 +1,72 @@
+# MeetingGraph configuration. Everything runs locally; no cloud endpoints are allowed.
+
+workspace: ./workspace          # project files live here (relative to this folder)
+
+llm:
+  # heuristic          = no model; rule-based extraction (works immediately, for plumbing tests)
+  # ollama             = local Ollama server on 127.0.0.1 (dev laptop; CPU/GPU, NOT the NPU)
+  # executorch_runner  = ExecuTorch runner executable (Snapdragon NPU path, set up on the Dell)
+  backend: executorch_runner    # Qwen3-1.7B (8k context, hybrid) on the Hexagon NPU (ExecuTorch QNN)
+  label: ""                     # optional text shown in the app; empty = automatic
+  # Qwen3-1.7B has an 8000-token context: a whole typical meeting fits in one request. The app still sizes
+  # each chunk to the context (plan_requests), so this is only an upper bound.
+  # (Phi-4-mini, 2048-token context, used 2500.)
+  max_transcript_chars_per_chunk: 20000
+  ollama:
+    url: http://127.0.0.1:11434
+    model: qwen2.5:3b-instruct   # bigger/better: qwen2.5:7b-instruct (needs ~6 GB RAM)
+    timeout_s: 600              # richer feature notes take longer on a CPU
+    num_ctx: 8192               # context window; Ollama's small default would cut long transcripts
+  executorch_runner:
+    # qnn_llama_runner mode: the app builds the command (sizes --seq_len per prompt, strips the chat template).
+    # The runner folder must also hold qnn_executorch_backend.dll, QnnHtp*.dll, QnnSystem.dll and the v73 skel.
+    # Qwen3-1.7B was compiled with QAIRT 2.46, so it runs from npu-run-246 (the 2.46 runtime DLLs + our runner).
+    # Phi-4-mini (QAIRT 2.37): runner C:/et/llm/npu-run/..., model C:/et/llm/phi4mini_w8a16_2k/kv_llama_qnn.pte,
+    #   tokenizer from the same folder, decoder_model_version phi_4_mini, max_seq_len 2048, eval_mode 0.
+    runner: C:/et/llm/npu-run-246/qnn_llama_runner.exe
+    model_path: C:/et/llm/qwen3_1_7b_ctx8k/sc8380_qwen3-1_7b_ctxt-8000.pte
+    tokenizer_path: C:/et/llm/qwen3_1_7b_ctx8k/tokenizer.json
+    decoder_model_version: qwen3
+    max_seq_len: 8000           # must match the export's context length
+    eval_mode: 1                # hybrid: reads the prompt 128 tokens per NPU step
+    # Keep the model loaded between requests (saves the ~5 s load per request). Unloads after keep_loaded_s idle.
+    server_runner: C:/et/llm/npu-run-246/qnn_llama_runner_server.exe
+    keep_loaded_s: 900          # 15 min: covers reviewing a meeting and asking follow-ups
+    # Generic alternative (leave runner empty): command with {prompt_file} {prompt} {output_file} {max_tokens}
+    command: []
+    cwd: ""
+    timeout_s: 600              # a ~1300-token prompt is read at ~12 tok/s in kv mode
+    verified_on_npu: true       # 2026-10-17: 8 QnnBackend delegate calls, NPU compute engine 100% during runs
+
+asr:
+  # none               = no speech recognition; import or type transcripts
+  # faster_whisper     = local Whisper on CPU (dev laptop)
+  # executorch_runner  = ExecuTorch ASR runner (Snapdragon NPU path)
+  backend: executorch_runner    # Whisper-small W8A16 on the Hexagon NPU (ExecuTorch QNN)
+  label: ""
+  faster_whisper:
+    model: base.en              # tiny.en | base.en | small.en ...
+    compute_type: int8
+    device: cpu
+  executorch_runner:
+    # qnn_whisper_runner mode: WAV -> windows -> numpy log-mel -> ONE runner call for all windows.
+    runner: C:/et/stt/npu-run/qnn_whisper_runner.exe
+    model_path: C:/et/stt/whisper_small/whisper_qnn_16a8w.pte
+    tokenizer_path: C:/et/stt/whisper_small/tokenizer.json
+    window_s: 20                # <= 30; shorter keeps each window's text within max_tokens
+    max_tokens: 128             # decoder length the model was exported with (--max_seq_len 128)
+    silence_rms: 0.003          # skip silent windows (Whisper invents text on silence)
+    # Generic alternative (leave runner empty): command with {audio_file} {output_file}
+    command: []
+    cwd: ""
+    timeout_s: 600
+    verified_on_npu: true       # 2026-10-17: encoder and decoder are each one QnnBackend delegate call
+
+audio:
+  samplerate: 16000
+  keep_audio_after_commit: false   # true = move WAVs into the project's audio/ folder instead of deleting
+  keep_transcript_after_commit: true   # keep the full transcript in the project's transcripts/ folder
+  max_minutes: 60
+  save_transcripts_to: ""   # off: private meeting transcripts must not land in the repo (tests/fixtures)
+  live_batch_s: 30              # while recording, add new transcript lines every N seconds
+  live_notes_every_s: 120       # ...and make notes for every N seconds of new transcript (0 = only after Stop)
